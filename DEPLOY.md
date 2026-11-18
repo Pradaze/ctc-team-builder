@@ -1,41 +1,54 @@
-# Putting the dashboard online
+# Putting the dashboard online for free
 
-## 1. Try it on your computer first
+The free setup has two parts:
 
-```
-pip install -r requirements.txt
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-```
+- **Neon** keeps the data (applications, reviews, teams, activity log) in a free Postgres database. Free, no card, 1 GB of storage per project. It sleeps after 5 minutes unused and wakes in well under a second.
+- **Streamlit Community Cloud** runs the app. Free, deploys from your GitHub repository, and sleeps when nobody has used it for a while; the first visitor after that clicks a button to wake it and waits a minute or so.
 
-Edit `.streamlit/secrets.toml`: add your Tally key and form ID, put your own email under `admins`, and for now delete the `[auth]` sections and set a password instead (instructions at the bottom of the file). Then:
+On your own computer nothing changes: without a `DATABASE_URL` the app keeps using the `data/` folder.
 
-```
-streamlit run app.py
-```
+## 1. Create the database (Neon)
 
-Open http://localhost:8501, sign in, go to **Admin** and either **Fetch new applications** or upload the `applicants.csv` you already have (it keeps your CV text). Data is stored in a `data/` folder next to the code.
+1. Sign up at neon.tech.
+2. Create a project. Pick a region in Europe (Frankfurt or London) to keep the data in Europe.
+3. On the project dashboard, click **Connect** and copy the connection string. It starts with `postgresql://` and ends with `?sslmode=require`.
 
-## 2. Set up sign-in with Microsoft (LBS accounts) or Google
+The app creates its own tables the first time it connects.
 
-You need an "app registration" so the provider will log people in for you.
+## 2. Set up sign-in (Microsoft or Google)
 
-**Microsoft:** Azure portal > Microsoft Entra ID > App registrations > New registration. Supported account types: "Accounts in any organizational directory and personal Microsoft accounts". Redirect URI (Web): `https://<your-app>.onrender.com/oauth2callback`, plus `http://localhost:8501/oauth2callback` for testing. Under Certificates & secrets, create a client secret. Copy the Application (client) ID and the secret value into `[auth.microsoft]`. If LBS IT blocks app registrations, use Google instead.
+You need an app registration so the provider can sign people in for you. You'll know your app's address after step 3; you can create the registration now and add the address afterwards.
 
-**Google:** Google Cloud console > APIs & Services > Credentials > Create OAuth client ID > Web application. Add the same two redirect URIs. Copy the client ID and secret into `[auth.google]`. On the OAuth consent screen, set the app to "External" and publish it (or add organisers as test users).
+**Microsoft:** Azure portal > Microsoft Entra ID > App registrations > New registration. Account types: "Accounts in any organizational directory and personal Microsoft accounts". Redirect URIs (Web): `https://<your-app>.streamlit.app/oauth2callback` and `http://localhost:8501/oauth2callback`. Under Certificates & secrets, create a client secret. Copy the client ID and the secret's value. If LBS IT blocks app registrations, use Google.
 
-Generate `cookie_secret` with `python -c "import secrets; print(secrets.token_hex(32))"`.
+**Google:** Google Cloud console > APIs & Services > Credentials > Create OAuth client ID > Web application, with the same two redirect URIs. On the OAuth consent screen choose External and publish the app (or add each organiser as a test user).
 
-Signing in only proves who someone is. Getting in also needs their email (or domain) in the `[access]` lists, so anyone not on the list sees "No access yet".
+Signing in only proves who someone is. To get in, their email or domain must also be in the `[access]` lists.
 
-## 3. Deploy on Render
+## 3. Deploy (Streamlit Community Cloud)
 
-1. Put this folder in a **private** GitHub repository. `.gitignore` already keeps out secrets and data.
-2. In Render: New > Blueprint > choose the repository. It reads `render.yaml`: a Starter web service in Frankfurt with a 1 GB disk mounted at `/var/data`, where the data lives.
-3. In the service's Environment tab, add a **Secret File** named `secrets.toml` with the contents of your secrets file, with `redirect_uri` set to `https://<your-app>.onrender.com/oauth2callback`. The app reads it from `/etc/secrets/secrets.toml`.
-4. Deploy, open the URL, sign in, and upload or fetch the data from **Admin**.
+1. Go to share.streamlit.io and sign in with GitHub. Allow it access to your private `ctc-team-builder` repository when asked.
+2. Click **Create app** > deploy from GitHub. Repository: `ctc-team-builder`, branch `main`, main file `app.py`. Choose a custom subdomain, e.g. `ctc-teams`, which gives `https://ctc-teams.streamlit.app`.
+3. Open **Advanced settings**. Set Python to 3.12. In **Secrets**, paste your secrets file (start from `.streamlit/secrets.toml.example`) with:
+   - `TALLY_API_KEY` and `TALLY_FORM_ID`
+   - `DATABASE_URL` = the Neon connection string
+   - `[access]` lists (admins, reviewers, viewers)
+   - `[auth]` with `redirect_uri = "https://ctc-teams.streamlit.app/oauth2callback"`, a `cookie_secret` (`python -c "import secrets; print(secrets.token_hex(32))"`), and your provider's client ID and secret. Delete the provider section you don't use. No password lines.
+4. Click **Deploy**. The first build takes a few minutes.
+5. Open the app, sign in, go to **Admin** and upload your `applicants.csv` (it keeps your CV text and review marks), or fetch from Tally.
 
-To change who has access, edit the Secret File and restart the service.
+To change who has access later: app menu > **Settings** > **Secrets**, edit the `[access]` lists, save. The app restarts with the new list.
 
-## 4. Data protection
+Every `git push` to `main` updates the app automatically. Data in Neon isn't affected by redeploys.
 
-The site stores applicants' personal details and CV text on Render's servers (EU region). Check this fits LBS's data-protection rules for the competition, keep the access list to organisers, and delete the data (Admin > download a copy if needed, then delete the disk or the service) once the competition no longer needs it. The activity log on the Admin page records who changed what.
+## Using the same data on your computer
+
+Add the same `DATABASE_URL` line to your local `.streamlit/secrets.toml`. Your local copy and the website then read and write the same data. Remove it to go back to the `data/` folder.
+
+## Alternative host: Render's free plan
+
+`render.yaml` sets up a free Render service in Frankfurt that also uses Neon for data. It works, but free Render instances have very little processing power (0.1 CPU), so building features and teams is noticeably slower, and it sleeps after 15 minutes. If you use it: New > Blueprint > choose the repository, add a Secret File named `secrets.toml` with the same content as above (with `redirect_uri` set to your `onrender.com` address), and deploy.
+
+## Data protection
+
+Applicants' details and CV text will sit in Neon (in the region you chose) and pass through Streamlit's servers, which are outside the EU. Check this is acceptable under LBS's data-protection rules for the competition, keep the access list to organisers, and delete the Neon project once the data is no longer needed (Admin > download a copy first if you need one).

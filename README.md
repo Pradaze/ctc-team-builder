@@ -2,7 +2,7 @@
 
 Two ways to use it, sharing the same matching engine (`team_builder.py`) and settings (`config.py`):
 
-- **Dashboard** (`streamlit run app.py`): review applicants, view LinkedIn and CVs, explore keyword and skill insights, build and adjust teams, with sign-in and roles. See DEPLOY.md to put it online.
+- **Dashboard** (`streamlit run app.py`): review applicants, view LinkedIn and CVs, explore keyword and skill insights, build and adjust teams, with sign-in and roles. Data is kept in `data/` locally, or in a free Neon Postgres database when `DATABASE_URL` is set. See DEPLOY.md to put it online for free.
 - **Command line** (`python team_builder.py fetch | cvs | check | build`): the same steps without a browser.
 
 ## How matching works
@@ -25,4 +25,5 @@ Interests (areas picked, bio, idea description and CV keywords) and time zone de
 | `countries.py` | country → time zone and map codes |
 | `.streamlit/config.toml` | dashboard theme |
 | `.streamlit/secrets.toml.example` | Tally key, sign-in and access list template |
-| `render.yaml`, `DEPLOY.md` | hosting |
+| `ctc_app/store.py` | storage: local files or Postgres |
+| `DEPLOY.md`, `render.yaml` | free hosting (Streamlit Community Cloud + Neon; Render as an alternative) |

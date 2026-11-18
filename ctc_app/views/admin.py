@@ -17,27 +17,27 @@ def _fetch(read_cvs):
             box.update(label="Fetch failed", state="error")
             st.error(str(e))
             return
-        df = T.merge_previous(df, state.APPLICANTS, log=box.write)
+        df = T.merge_previous(df, state.load_applicants(with_reviews=False), log=box.write)
         if read_cvs:
             bar = st.progress(0.0, text="Reading new CVs…")
             df, stats = T.read_cvs(df, log=box.write,
                                    progress=lambda n, total: bar.progress(n / max(total, 1), text=f"CV {n} of {total}"))
             bar.empty()
-        state.save_raw(df, ui.user()["email"], "Fetch", f"{len(df)} submissions" + (", CVs read" if read_cvs else ""))
+        state.save_applicants(df, ui.user()["email"], "Fetch", f"{len(df)} submissions" + (", CVs read" if read_cvs else ""))
         box.update(label=f"Fetched {len(df)} submissions", state="complete", expanded=False)
     st.session_state["_toast"] = "Applications updated"
     st.rerun()
 
 
 def _read_cvs(refresh):
-    df = T.load_csv(state.APPLICANTS)
+    df = state.load_applicants(with_reviews=False)
     bar = st.progress(0.0, text="Reading CVs…")
     with st.status("Reading CVs…", expanded=True) as box:
         df, stats = T.read_cvs(df, refresh=refresh, log=box.write,
                                progress=lambda n, total: bar.progress(n / max(total, 1), text=f"CV {n} of {total}"))
         box.update(label="CVs read", state="complete", expanded=False)
     bar.empty()
-    state.save_raw(df, ui.user()["email"], "Read CVs",
+    state.save_applicants(df, ui.user()["email"], "Read CVs",
                    ", ".join(f"{k}: {v}" for k, v in stats.most_common()) or "nothing new")
     st.session_state["_toast"] = "CVs read"
     st.rerun()
@@ -55,7 +55,7 @@ def render():
         df, dups = state.people(state.data_version())
         cv_n = int((raw.get(T.CV_TEXT_COL, pd.Series(dtype=str)).fillna("") != "").sum())
         st.write(f"{len(raw)} submissions from {len(df)} people. CV text for {cv_n}. "
-                 f"Last updated {state.last_updated():%d %b %Y at %H:%M}.")
+                 f"Last updated {state.last_updated():%d %b %Y at %H:%M}. Stored in: {state.storage_label()}.")
     else:
         st.write("No applications yet.")
 
@@ -92,12 +92,12 @@ def render():
                 st.error("This file is missing columns from config.py: " + "; ".join(map(str, missing)))
             else:
                 if T.ID_COL in new.columns:
-                    new = T.merge_previous(new, state.APPLICANTS, log=lambda *_: None)
-                state.save_raw(new, ui.user()["email"], "Upload", f"{len(new)} rows from {up.name}")
+                    new = T.merge_previous(new, state.load_applicants(with_reviews=False), log=lambda *_: None)
+                state.save_applicants(new, ui.user()["email"], "Upload", f"{len(new)} rows from {up.name}")
                 st.session_state["_toast"] = f"Loaded {len(new)} rows"
                 st.rerun()
         if state.has_data():
-            st.download_button("Download applicants.csv", state.APPLICANTS.read_bytes(),
+            st.download_button("Download applicants.csv", state.applicants_csv_bytes(),
                                file_name="applicants.csv", mime="text/csv",
                                help="Includes personal data and CV text. Store it securely.")
 

@@ -27,6 +27,3 @@ chartCategoricalColors = ["#1D7558", "#E2A230", "#3B78A8", "#7D5BA6", "#4FA597",
 [theme.sidebar]
 backgroundColor = "#EDF3EF"
 
-[secrets]
-# Local file first; on Render, the Secret File at /etc/secrets/secrets.toml.
-files = [".streamlit/secrets.toml", "/etc/secrets/secrets.toml"]

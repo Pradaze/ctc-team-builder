@@ -1,10 +1,21 @@
-"""Data access for the dashboard: files on disk, caching, saving, activity log."""
+"""Data access for the dashboard: storage, caching, saving, activity log.
 
-import csv
+Data lives in a store (see store.py): local files, or a Postgres database when
+DATABASE_URL is set. Three things are stored:
+
+- applicants.csv  the Tally submissions plus CV text (large, changes on fetch)
+- reviews.json    include/exclude, rating and notes per person (small, changes often)
+- teams.json      the current teams
+
+Keeping reviews separate means a review click rewrites a few kilobytes, not
+the whole applications file.
+"""
+
 import json
 import os
 import threading
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -13,24 +24,16 @@ import streamlit as st
 
 import team_builder as T
 
+from .store import csv_bytes, make_store
+
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = Path(os.environ.get("CTC_DATA_DIR", ROOT / "data"))
-APPLICANTS = DATA_DIR / "applicants.csv"
-TEAMS = DATA_DIR / "teams.json"
-AUDIT = DATA_DIR / "activity.csv"
+APPLICANTS, REVIEWS, TEAMS = "applicants.csv", "reviews.json", "teams.json"
 _lock = threading.RLock()
 
 
 # ---------------------------------------------------------------------------
 # Secrets: st.secrets first, then environment variables
 # ---------------------------------------------------------------------------
-def secrets():
-    try:
-        return st.secrets
-    except Exception:
-        return {}
-
-
 def secret(name, default=None):
     try:
         if name in st.secrets:
@@ -40,30 +43,76 @@ def secret(name, default=None):
     return os.environ.get(name, default)
 
 
+@st.cache_resource
+def _store(url, folder):
+    return make_store(url, folder)
+
+
+def store():
+    return _store(secret("DATABASE_URL"), os.environ.get("CTC_DATA_DIR", str(ROOT / "data")))
+
+
 # ---------------------------------------------------------------------------
-# Versioning: caches are keyed on file modification times
+# Versions: caches are keyed on these, so a change anywhere refreshes them
 # ---------------------------------------------------------------------------
+@st.cache_data(ttl=3, show_spinner=False)
+def _versions():
+    # one round trip for all three; cached briefly so a page that asks several
+    # times doesn't query the database each time (writes clear it at once)
+    return store().versions([APPLICANTS, REVIEWS, TEAMS])
+
+
 def data_version():
-    return APPLICANTS.stat().st_mtime_ns if APPLICANTS.exists() else 0
+    return _versions()[:2]
 
 
 def teams_version():
-    return TEAMS.stat().st_mtime_ns if TEAMS.exists() else 0
+    return _versions()[2]
 
 
 def has_data():
-    return APPLICANTS.exists()
+    return data_version()[0] != 0
 
 
 def last_updated():
-    if not APPLICANTS.exists():
+    t = store().updated_at(APPLICANTS)
+    return t.astimezone() if t else None
+
+
+def _read_csv(data):
+    df = pd.read_csv(StringIO(data.decode("utf-8")), dtype=str, keep_default_na=False)
+    return T.tidy_columns(df)
+
+
+def reviews():
+    data = store().read(REVIEWS)
+    return json.loads(data) if data else {}
+
+
+def _apply_reviews(df, rv):
+    for c in (T.INCLUDE_COL, T.MOTIVATION_COL, T.NOTES_COL):
+        if c not in df.columns:
+            df[c] = ""
+    if rv:
+        keys = T.person_key(df)
+        for col, field in ((T.INCLUDE_COL, "include"), (T.MOTIVATION_COL, "rating"), (T.NOTES_COL, "notes")):
+            vals = [rv[k][field] if k in rv and field in rv[k] else None for k in keys]
+            df[col] = [v if v is not None else old for v, old in zip(vals, df[col])]
+    return df
+
+
+def load_applicants(with_reviews=True):
+    """Fresh (uncached) copy of all submissions."""
+    data = store().read(APPLICANTS)
+    if data is None:
         return None
-    return datetime.fromtimestamp(APPLICANTS.stat().st_mtime)
+    df = _read_csv(data)
+    return _apply_reviews(df, reviews()) if with_reviews else df
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
 def raw(version):
-    return T.load_csv(APPLICANTS)
+    return load_applicants()
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
@@ -71,24 +120,26 @@ def people(version):
     df, dups = T.people_table(raw(version))
     df = df.copy()
     df["_key"] = T.person_key(df)
-    df["_status"] = [T.include_status(v) for v in df.get(T.INCLUDE_COL, [""] * len(df))]
-    df["_included"] = [T.is_included(v) for v in df.get(T.INCLUDE_COL, [""] * len(df))]
+    df["_status"] = [T.include_status(v) for v in df[T.INCLUDE_COL]]
+    df["_included"] = [T.is_included(v) for v in df[T.INCLUDE_COL]]
     return df, dups
+
+
+def _features_frame(df):
+    return df.drop(columns=[c for c in df.columns if c.startswith("_")])
 
 
 @st.cache_resource(show_spinner="Reading applications…", max_entries=3)
 def applicants_all(version):
     df, _ = people(version)
-    return T.Applicants(df.drop(columns=[c for c in df.columns if c.startswith("_")]))
+    return T.Applicants(_features_frame(df))
 
 
 @st.cache_resource(show_spinner="Preparing the included applicants…", max_entries=3)
 def applicants_included(version):
     df, _ = people(version)
     inc = df[df["_included"]]
-    if len(inc) == 0:
-        return None
-    return T.Applicants(inc.drop(columns=[c for c in inc.columns if c.startswith("_")]))
+    return T.Applicants(_features_frame(inc)) if len(inc) else None
 
 
 @st.cache_data(show_spinner="Mapping the applicants…", max_entries=3)
@@ -111,6 +162,7 @@ def landscape(version):
 
 
 def clear_caches():
+    _versions.clear()
     raw.clear()
     people.clear()
     landscape.clear()
@@ -119,50 +171,61 @@ def clear_caches():
 # ---------------------------------------------------------------------------
 # Writing
 # ---------------------------------------------------------------------------
-def _atomic_write_csv(df, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    df.to_csv(tmp, index=False)
-    os.replace(tmp, path)
-
-
-def save_raw(df, user, action, detail=""):
+def save_applicants(df, user, action, detail=""):
+    """Save submissions. Review marks found in the file are moved into
+    reviews.json for anyone who hasn't been reviewed in the dashboard yet."""
     with _lock:
-        _atomic_write_csv(df, APPLICANTS)
+        rv = reviews()
+        changed = False
+        for key, row in zip(T.person_key(df), df.to_dict("records")):
+            if key in rv:
+                continue
+            marks = {f: row.get(c, "") for f, c in (("include", T.INCLUDE_COL), ("rating", T.MOTIVATION_COL),
+                                                     ("notes", T.NOTES_COL))}
+            if any(marks.values()):
+                rv[key] = marks
+                changed = True
+        store().write(APPLICANTS, csv_bytes(df))
+        if changed:
+            store().write(REVIEWS, json.dumps(rv).encode())
         log(user, action, detail)
     clear_caches()
 
 
 def set_marks(keys, user, status=None, rating=None, notes=None):
-    """Update review fields for people (all of their submissions)."""
-    keys = set(keys)
+    """Update review fields for people (by person key)."""
     with _lock:
-        df = T.load_csv(APPLICANTS)
-        for c in (T.INCLUDE_COL, T.MOTIVATION_COL, T.NOTES_COL):
-            if c not in df.columns:
-                df[c] = ""
-        rows = np.array([k in keys for k in T.person_key(df)])
-        if status is not None:
-            df.loc[rows, T.INCLUDE_COL] = {"Included": "yes", "Excluded": "no", "Not reviewed": ""}[status]
-        if rating is not None:
-            df.loc[rows, T.MOTIVATION_COL] = "" if rating in ("", None) else str(int(rating))
-        if notes is not None:
-            df.loc[rows, T.NOTES_COL] = notes
-        _atomic_write_csv(df, APPLICANTS)
+        rv = reviews()
+        for k in keys:
+            r = rv.setdefault(k, {})
+            if status is not None:
+                r["include"] = {"Included": "yes", "Excluded": "no", "Not reviewed": ""}[status]
+            if rating is not None:
+                r["rating"] = "" if rating in ("", None) else str(int(rating))
+            if notes is not None:
+                r["notes"] = notes
+        store().write(REVIEWS, json.dumps(rv).encode())
     what = ", ".join(x for x, v in (("status " + str(status), status), ("rating", rating), ("notes", notes))
                      if v is not None)
     log(user, "Review", f"{len(keys)} people: {what}")
     clear_caches()
 
 
+def applicants_csv_bytes():
+    """The full applications file with current review marks, for download."""
+    df = load_applicants()
+    return csv_bytes(df) if df is not None else b""
+
+
 # ---------------------------------------------------------------------------
 # Teams
 # ---------------------------------------------------------------------------
 def load_teams():
-    if not TEAMS.exists():
+    data = store().read(TEAMS)
+    if not data:
         return None
     try:
-        return json.loads(TEAMS.read_text())
+        return json.loads(data)
     except Exception:
         return None
 
@@ -173,11 +236,9 @@ def save_teams(res, user, action, detail="", **meta):
         "built_at": old.get("built_at"), "built_by": old.get("built_by"),
         "manual_edits": old.get("manual_edits", 0), **meta})
     with _lock:
-        TEAMS.parent.mkdir(parents=True, exist_ok=True)
-        tmp = TEAMS.with_suffix(".tmp")
-        tmp.write_text(json.dumps(js, indent=1))
-        os.replace(tmp, TEAMS)
+        store().write(TEAMS, json.dumps(js).encode())
         log(user, action, detail)
+    _versions.clear()
     return js
 
 
@@ -201,23 +262,22 @@ def summarise(res):
 # Activity log
 # ---------------------------------------------------------------------------
 def log(user, action, detail=""):
-    AUDIT.parent.mkdir(parents=True, exist_ok=True)
-    new = not AUDIT.exists()
-    with _lock, open(AUDIT, "a", newline="") as f:
-        w = csv.writer(f)
-        if new:
-            w.writerow(["When (UTC)", "Who", "Action", "Details"])
-        w.writerow([datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), user, action, detail])
+    try:
+        store().log(user, action, detail)
+    except Exception:
+        pass  # never block a save because the log failed
 
 
 def activity(limit=500):
-    if not AUDIT.exists():
-        return pd.DataFrame(columns=["When (UTC)", "Who", "Action", "Details"])
-    df = pd.read_csv(AUDIT, dtype=str, keep_default_na=False)
-    return df.iloc[::-1].head(limit)
+    from .store import ACTIVITY_COLUMNS
+    return pd.DataFrame(store().activity(limit), columns=ACTIVITY_COLUMNS)
 
 
 def last_action(action):
     df = activity(2000)
     hit = df[df["Action"] == action]
     return None if hit.empty else hit.iloc[0].to_dict()
+
+
+def storage_label():
+    return store().kind

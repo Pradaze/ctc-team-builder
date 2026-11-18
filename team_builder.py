@@ -430,10 +430,12 @@ def fetch_from_tally(form_id, key, log=print):
 def merge_previous(df, out, log=print):
     """Carry the manual columns (include, rating, notes, CV text) over from an
     earlier applicants.csv, matched by submission ID."""
-    out = Path(out)
-    if not out.exists():
+    if isinstance(out, pd.DataFrame):
+        old = out
+    elif out is None or not Path(out).exists():
         return df
-    old = load_csv(out)
+    else:
+        old = load_csv(out)
     if ID_COL not in old.columns:
         return df
     for c in MANUAL_COLS:

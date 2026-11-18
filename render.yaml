@@ -1,21 +1,17 @@
-# Render Blueprint: one web service with a persistent disk for the data.
-# In Render: New > Blueprint > pick this repository. Then add the Secret File
-# (see DEPLOY.md) before the first sign-in.
+# Alternative host: Render's free plan (the recommended free host is Streamlit
+# Community Cloud; see DEPLOY.md). Free Render services have little CPU, sleep
+# after 15 minutes without visitors and take about a minute to wake.
+# Data is kept in your Neon database (DATABASE_URL), not on Render.
 services:
   - type: web
     name: ctc-team-builder
     runtime: python
-    plan: starter            # persistent disks need a paid instance
-    region: frankfurt        # EU region, closest to London
+    plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    # copies the Secret File into place, then starts the app
+    startCommand: mkdir -p .streamlit && cp /etc/secrets/secrets.toml .streamlit/secrets.toml 2>/dev/null; streamlit run app.py --server.port $PORT --server.address 0.0.0.0
     healthCheckPath: /_stcore/health
     envVars:
-      - key: CTC_DATA_DIR
-        value: /var/data
       - key: PYTHON_VERSION
         value: 3.12.7
-    disk:
-      name: ctc-data
-      mountPath: /var/data
-      sizeGB: 1
