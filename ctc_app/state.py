@@ -11,6 +11,7 @@ Keeping reviews separate means a review click rewrites a few kilobytes, not
 the whole applications file.
 """
 
+import hashlib
 import json
 import os
 import threading
@@ -27,6 +28,17 @@ import team_builder as T
 from .store import csv_bytes, make_store
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def engine_version():
+    """Changes whenever team_builder.py or config.py changes, so objects cached
+    by an older version of the code are never reused after an update. Checked
+    on every page load (a cheap file-time lookup)."""
+    h = hashlib.md5()
+    for f in ("team_builder.py", "config.py"):
+        st_ = (ROOT / f).stat()
+        h.update(f"{f}:{st_.st_mtime_ns}:{st_.st_size}".encode())
+    return h.hexdigest()[:10]
 APPLICANTS, REVIEWS, TEAMS = "applicants.csv", "reviews.json", "teams.json"
 _lock = threading.RLock()
 
@@ -63,7 +75,7 @@ def _versions():
 
 
 def data_version():
-    return _versions()[:2]
+    return _versions()[:2] + (engine_version(),)
 
 
 def teams_version():
