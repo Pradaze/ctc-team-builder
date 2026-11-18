@@ -1,0 +1,21 @@
+# Render Blueprint: one web service with a persistent disk for the data.
+# In Render: New > Blueprint > pick this repository. Then add the Secret File
+# (see DEPLOY.md) before the first sign-in.
+services:
+  - type: web
+    name: ctc-team-builder
+    runtime: python
+    plan: starter            # persistent disks need a paid instance
+    region: frankfurt        # EU region, closest to London
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: CTC_DATA_DIR
+        value: /var/data
+      - key: PYTHON_VERSION
+        value: 3.12.7
+    disk:
+      name: ctc-data
+      mountPath: /var/data
+      sizeGB: 1

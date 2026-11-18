@@ -1,0 +1,32 @@
+[server]
+headless = true
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#1D7558"
+backgroundColor = "#F9FAF8"
+secondaryBackgroundColor = "#E9F0EC"
+textColor = "#18322C"
+linkColor = "#1D6496"
+borderColor = "#D3DED8"
+font = "Figtree:https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap, sans-serif"
+headingFont = "Bricolage Grotesque:https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&display=swap, sans-serif"
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+baseRadius = "0.6rem"
+metricValueFontWeight = 600
+showWidgetBorder = true
+chartCategoricalColors = ["#1D7558", "#E2A230", "#3B78A8", "#7D5BA6", "#4FA597", "#A9A245", "#C2667F", "#6B7A80"]
+
+[theme.sidebar]
+backgroundColor = "#EDF3EF"
+
+[secrets]
+# Local file first; on Render, the Secret File at /etc/secrets/secrets.toml.
+files = [".streamlit/secrets.toml", "/etc/secrets/secrets.toml"]
