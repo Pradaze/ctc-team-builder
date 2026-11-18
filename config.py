@@ -47,8 +47,10 @@ COLUMNS = {
     "interest_tags": AREAS,                               # multi-select
     "interest_text": [BIO, IDEA_DETAILS, AREAS_OTHER],    # free text
 
-    # Criterion 3 - idea status
+    # Criterion 3 - idea status, and the idea descriptions (used to keep
+    # idea-holders who share a team working on similar ideas)
     "idea_status": IDEA,
+    "idea_text": [IDEA_DETAILS],
 
     # Criterion 4 - time zone
     "country": COUNTRY,
@@ -203,9 +205,14 @@ WEIGHTS = {
     "timezone_match": 2.0,         # criterion 4
     "background_diversity": 1.0,   # criterion 5
     "skill_coverage": 1.0,         # criterion 6
-    "commitment_balance": 0.5,     # criterion 7
+    "commitment_balance": 0.5,     # criterion 7: spreads people who can't attend the finals
     "idea_mix": 1.5,               # criterion 3: closer to half-and-half is better
+    "idea_alignment": 2.0,         # criterion 3: idea-holders in a team have similar ideas
 }
+
+# Idea similarity is scaled so the closest 10% of idea pairs score 1. Teams whose
+# idea-holders' ideas score below this on average are flagged.
+IDEA_ALIGNMENT_FLAG = 0.15
 
 # How interest similarity blends its three sources (re-weighted per pair when
 # someone is missing one, e.g. no CV text).

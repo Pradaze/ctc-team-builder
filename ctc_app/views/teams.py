@@ -15,7 +15,8 @@ from .. import charts, state, ui
 COMP_LABELS = {
     "interest_similarity": "Interests", "timezone_match": "Time zone",
     "background_diversity": "Background mix", "skill_coverage": "Skill coverage",
-    "commitment_balance": "Commitment balance", "idea_mix": "Idea mix",
+    "commitment_balance": "Finals and commitment", "idea_mix": "Idea mix",
+    "idea_alignment": "Idea alignment",
 }
 
 
@@ -37,12 +38,16 @@ COMP_HELP = {
         "communication): for each skill, the strongest member's score (0 to 1, from keywords in bios and CVs), "
         "averaged over the six.",
     "commitment_balance":
-        "Whether members are similarly committed: 1 minus the gap between the most and least committed member. "
-        "Commitment is 1.0 for 'yes' to attending the London finals and 0.3 for 'no', averaged with the 1-5 "
-        "rating where you've given one.",
+        "Spreads out people who can't attend the London finals: 1 when at most one member can't attend, lower "
+        "as more of them share a team. Averaged with how similar members' 1-5 motivation ratings are, where at "
+        "least two have one. (Separately, a hard rule makes sure every team has someone who can attend.)",
     "idea_mix":
         "How evenly the team splits between people with and without an idea: 1 when exactly half have one, "
         "falling to 0 when all or none do.",
+    "idea_alignment":
+        "When a team has two or more idea-holders, how similar their ideas are, from the words in their idea "
+        "descriptions. Scaled so the closest 10% of idea pairs score 1. A team with a single idea-holder "
+        "scores 1, as there's nothing to clash.",
 }
 WEIGHT_HELP = ("Weight from 0 to 6. The team score adds up each criterion's 0-1 value times its weight, so only "
                "the ratios matter: 4 against 2 means this counts twice as much. 0 ignores it.")
@@ -59,8 +64,9 @@ def _how_it_works():
     with st.expander("How scoring works"):
         st.write("Each team gets a score for six criteria, each between 0 and 1. The **team score** is the "
                  "sum of each value times its weight. Teams are formed to make the total across all teams as "
-                 "high as possible, with two rules always kept where the numbers allow: every team gets at "
-                 "least one person with an idea and one without, and sizes stay within the limits you set.")
+                 "high as possible, with rules always kept where the numbers allow: every team gets at least "
+                 "one person with an idea and one without, at least one person who can attend the London "
+                 "finals in person, and sizes stay within the limits you set.")
         for k, label in COMP_LABELS.items():
             st.markdown(f"**{label}.** {COMP_HELP[k]}")
         st.write("Before teams are formed, people are grouped into pools of similar interests and time zones, "
@@ -127,7 +133,28 @@ def _move_panel(res, tables, js):
         here = team_of.get(i, "Unassigned")
         dest = c2.selectbox("Move to", [o for o in options if o != here])
         c3.write("")
-        if c3.button("Move", type="primary", width="stretch"):
+        src = next((t for t in res["teams"] if i in t["members"]), None)
+        dst = next((t for t in res["teams"] if t["id"] == dest), None)
+        problems = []
+        if dst is not None and len(dst["members"]) >= C.MAX_TEAM_SIZE:
+            problems.append(("block", f"{dest} already has {len(dst['members'])} members, the maximum."))
+        if src is not None:
+            rest = [x for x in src["members"] if x != i]
+            if rest:
+                if A.has_idea[i] and not any(A.has_idea[x] for x in rest):
+                    problems.append(("warn", f"{here} would be left with no idea-holder."))
+                if not A.has_idea[i] and all(A.has_idea[x] for x in rest):
+                    problems.append(("warn", f"{here} would be left with everyone already having an idea."))
+                if A.can_attend[i] and not any(A.can_attend[x] for x in rest):
+                    problems.append(("warn", f"{here} would be left with no one who can attend the finals."))
+                if len(rest) < C.MIN_TEAM_SIZE:
+                    problems.append(("warn", f"{here} would drop to {len(rest)}, below the minimum of "
+                                             f"{C.MIN_TEAM_SIZE}."))
+        blocked = any(k == "block" for k, _ in problems)
+        for k, msg in problems:
+            (st.error if k == "block" else st.warning)(msg)
+        ok = not problems or (not blocked and st.checkbox("Move anyway", key=f"anyway_{i}_{dest}"))
+        if c3.button("Move", type="primary", width="stretch", disabled=blocked or not ok):
             if dest == "New team":
                 dest = T.new_team(res)
             T.move_person(res, i, None if dest == "Unassigned" else dest)
@@ -191,18 +218,21 @@ def render():
         with right:
             col_key = {"Interest similarity": "interest_similarity", "Time zone match": "timezone_match",
                        "Background diversity": "background_diversity", "Skill coverage": "skill_coverage",
-                       "Idea mix": "idea_mix"}
+                       "Idea mix": "idea_mix", "Idea alignment": "idea_alignment"}
             cfg = {k: st.column_config.ProgressColumn(k, min_value=0, max_value=1, format="%.2f",
                                                       help=COMP_HELP[col_key[k]])
                    for k in col_key if k in summ}
             cfg["Idea-holders"] = st.column_config.NumberColumn("Idea-holders",
                                                                 help="Members who said they already have an idea")
+            cfg["Can attend finals"] = st.column_config.NumberColumn(
+                "Can attend finals", help="Members who said they can attend the London finals in person")
             cfg["Time zones"] = st.column_config.TextColumn("Time zones",
                                                             help="Earliest and latest member time zone, and the gap")
             cfg["Check"] = st.column_config.TextColumn("Check", help="Things worth a look: skill gaps, missing "
                                                        "idea-holders, wide time-zone spread, finals attendance")
-            st.dataframe(summ[["Team", "Size", "Idea-holders", "Interest similarity", "Time zone match",
-                               "Background diversity", "Skill coverage", "Idea mix", "Time zones", "Check"]],
+            st.dataframe(summ[["Team", "Size", "Idea-holders", "Can attend finals", "Interest similarity",
+                               "Idea alignment", "Time zone match", "Background diversity", "Skill coverage",
+                               "Idea mix", "Time zones", "Check"]],
                          hide_index=True, column_config=cfg, height=420)
 
     with t2:
@@ -237,7 +267,7 @@ def render():
                 st.warning(row["Check"])
             tm = mem[mem["Team"] == tid].copy()
             tm["LinkedIn"] = tm["LinkedIn"].map(ui.url)
-            st.dataframe(tm[["Name", "Has idea", "Country", "Time zone", "Areas", "Keywords", "Top skills",
+            st.dataframe(tm[["Name", "Has idea", "Idea", "Country", "Time zone", "Areas", "Keywords", "Top skills",
                              "Can attend finals", "Interest fit", "LinkedIn", "Email"]], hide_index=True,
                          column_config={"LinkedIn": st.column_config.LinkColumn("LinkedIn", display_text="Profile"),
                                         "Interest fit": st.column_config.ProgressColumn(

@@ -782,6 +782,23 @@ class Applicants:
             commit = np.nanmean(np.vstack([avail, motiv]), axis=0)
         self.commitment = np.where(np.isnan(commit), 0.5, commit)
         self.low_avail = np.array([not np.isnan(a) and a < 0.5 for a in avail])
+        self.can_attend = ~self.low_avail
+        self.rating = motiv                      # 0-1, NaN where no rating given
+
+        # Ideas: how similar two idea-holders' ideas are (TF-IDF on the idea
+        # descriptions; falls back to overall interest similarity for anyone
+        # who said yes but didn't describe the idea)
+        self.idea_text = joined(d, cols("idea_text")).tolist()
+        S_it, has_it = self._plain_similarity(self.idea_text)
+        both = has_it[:, None] & has_it[None, :]
+        S_idea = np.where(both, S_it, self.S_int)
+        # Short texts give small raw similarities, so rescale: the closest 10%
+        # of idea pairs score 1, everything else proportionally below
+        hold = np.where(self.has_idea)[0]
+        off = S_idea[np.ix_(hold, hold)][~np.eye(len(hold), dtype=bool)] if len(hold) > 1 else np.array([])
+        top = float(np.percentile(off, 90)) if off.size and np.percentile(off, 90) > 0 else 1.0
+        self.S_idea = np.clip(S_idea / top, 0, 1)
+        np.fill_diagonal(self.S_idea, 1.0)
 
         a = C.POOL_INTEREST_SHARE
         self.P = a * self.S_int + (1 - a) * self.S_tz
@@ -876,10 +893,21 @@ def components(A, m):
         "background_diversity": float(np.mean(
             [len({dim[i] for i in m}) / min(k, A.n_bg_cats) for dim in A.bg_dims])) if A.bg_dims and k else 0.0,
     }
-    c = A.commitment[m] if k else np.array([0.5])
-    comp["commitment_balance"] = float(1 - (c.max() - c.min()))
+    # Finals and commitment: spread people who can't attend (1.0 with at most
+    # one per team, lower as more share a team), averaged with how similar the
+    # members' 1-5 ratings are where at least two have been rated
+    no = int(A.low_avail[m].sum()) if k else 0
+    spread = 1 - max(0, no - 1) / max(1, k - 1)
+    r = A.rating[m] if k else np.array([])
+    r = r[~np.isnan(r)]
+    rating_balance = float(1 - (r.max() - r.min())) if len(r) >= 2 else 1.0
+    comp["commitment_balance"] = float((spread + rating_balance) / 2)
     share = float(A.has_idea[m].mean()) if k else 0.5
     comp["idea_mix"] = 1 - abs(share - 0.5) * 2   # 1.0 = half have an idea
+    # Idea alignment: when a team has two or more idea-holders, how similar
+    # their ideas are (1.0 when there's only one idea, so nothing to clash)
+    ideas = [i for i in m if A.has_idea[i]]
+    comp["idea_alignment"] = mean_pairwise(A.S_idea, ideas) if len(ideas) >= 2 else 1.0
     return comp
 
 
@@ -988,10 +1016,19 @@ def rebalance(A, pools, flag, borrowed):
 # ===========================================================================
 # 6. Teams inside a pool
 # ===========================================================================
+def team_rules(A, team):
+    """Which hard rules a team currently meets: (has an idea-holder, has someone
+    without an idea, has someone who can attend the finals in person)."""
+    return (any(A.has_idea[i] for i in team), any(not A.has_idea[i] for i in team),
+            any(A.can_attend[i] for i in team))
+
+
 def valid(A, team, req):
-    need_idea, need_non = req
+    need_idea, need_non, need_attend = (tuple(req) + (False,) * 3)[:3]
     k_idea = int(A.has_idea[team].sum()) if team else 0
-    return (not need_idea or k_idea >= 1) and (not need_non or len(team) - k_idea >= 1)
+    attend = bool(A.can_attend[team].any()) if team else False
+    return ((not need_idea or k_idea >= 1) and (not need_non or len(team) - k_idea >= 1)
+            and (not need_attend or attend))
 
 
 def form_teams(A, pool, rng):
@@ -1012,7 +1049,15 @@ def form_teams(A, pool, rng):
         best = max(cands, key=lambda i: team_value(A, teams[ti] + [i]) - team_value(A, teams[ti]))
         teams[ti].append(best)
         unplaced.discard(best)
-    reqs = [(any(A.has_idea[i] for i in tm), any(not A.has_idea[i] for i in tm)) for tm in teams]
+    # every team needs someone who can attend the finals in person
+    for ti in range(t):
+        if not any(A.can_attend[i] for i in teams[ti]):
+            cands = [i for i in unplaced if A.can_attend[i]]
+            if cands:
+                best = max(cands, key=lambda i: team_value(A, teams[ti] + [i]) - team_value(A, teams[ti]))
+                teams[ti].append(best)
+                unplaced.discard(best)
+    reqs = [team_rules(A, tm) for tm in teams]
 
     order = sorted(unplaced)
     rng.shuffle(order)
@@ -1149,6 +1194,11 @@ def describe_team(A, m, borrowed):
         gap = 24 - gap if gap > 12 else gap
         if gap >= C.TZ_FLAG_GAP_HOURS:
             flags.append(f"Wide time-zone spread ({gap:g}h)")
+    if not any(A.can_attend[i] for i in m):
+        flags.append("No one can attend the London finals")
+    holders = [i for i in m if A.has_idea[i]]
+    if len(holders) >= 2 and mean_pairwise(A.S_idea, holders) < getattr(C, "IDEA_ALIGNMENT_FLAG", 0.1):
+        flags.append("Idea-holders' ideas look unrelated")
     low = [A.names[i] for i in m if A.low_avail[i]]
     if low:
         flags.append(f"{C.LOW_AVAILABILITY_LABEL}: " + ", ".join(low))
@@ -1244,6 +1294,7 @@ def build_teams(A, dups=None, log=print):
     for _ in range(3):
         pools = rebalance(A, pools, A.has_idea, borrowed)
         pools = rebalance(A, pools, ~A.has_idea, borrowed)
+        pools = rebalance(A, pools, A.can_attend, borrowed)
     pools = [sorted(p) for p in pools]
     log(f"{len(pools)} pools: sizes {sorted(len(p) for p in pools)}")
 
@@ -1298,6 +1349,9 @@ def result_from_json(js, A):
     pools = [[idx[k] for k in p if k in idx] for p in js.get("pools", [])]
     teams = [{"id": t["id"], "pool": t.get("pool", 0), "req": tuple(t.get("req", (True, True))),
               "members": [idx[k] for k in t["members"] if k in idx]} for t in js.get("teams", [])]
+    for t in teams:
+        if len(t["req"]) < 3:  # saved before the attendance rule existed
+            t["req"] = tuple(t["req"]) + (bool(A.can_attend[t["members"]].any()) if t["members"] else False,)
     placed = {i for t in teams for i in t["members"]}
     unassigned, seen = [], set()
     for u in js.get("unassigned", []):
@@ -1341,7 +1395,7 @@ def new_team(res):
     n = len(res["teams"]) + 1
     while f"T{n:02d}" in used:
         n += 1
-    res["teams"].append({"id": f"T{n:02d}", "pool": 0, "req": (False, False), "members": []})
+    res["teams"].append({"id": f"T{n:02d}", "pool": 0, "req": (False, False, False), "members": []})
     return f"T{n:02d}"
 
 
@@ -1407,7 +1461,9 @@ def summarise(res):
             "Skill coverage": round(comp["skill_coverage"], 2),
             "Commitment balance": round(comp["commitment_balance"], 2),
             "Idea mix": round(comp["idea_mix"], 2),
+            "Idea alignment": round(comp["idea_alignment"], 2),
             "Idea-holders": int(A.has_idea[m].sum()),
+            "Can attend finals": int(A.can_attend[m].sum()),
             "Time zones": tz_summary(A, m),
             "Why this team": why, "Check": flags,
         })
@@ -1415,6 +1471,7 @@ def summarise(res):
             members.append({
                 "Team": tid, "Name": A.names[i], "Email": A.emails[i], "LinkedIn": A.linkedin[i],
                 "Has idea": "Yes" if A.has_idea[i] else "No",
+                "Idea": (A.idea_text[i][:300] + ("…" if len(A.idea_text[i]) > 300 else "")) if A.has_idea[i] else "",
                 "Country": A.country[i], "Time zone": fmt_offset(A.offset[i]),
                 "Areas": ", ".join(A.tags[i]), "Keywords": ", ".join(A.keywords[i]),
                 "Programme category": A.degree_cat[i], "Main field (CV/bio)": A.cv_field[i],
