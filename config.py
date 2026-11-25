@@ -241,6 +241,6 @@ MAX_UNASSIGNED_SHARE = 0.10    # ...up to this share of applicants
 
 # Review: blank 'include' = included unless you mark the person "no".
 # Set to False to include only people marked "yes".
-INCLUDE_BY_DEFAULT =
+INCLUDE_BY_DEFAULT = True
 
 RANDOM_SEED = 2027
